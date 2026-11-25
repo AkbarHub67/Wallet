@@ -1,0 +1,543 @@
+name: Build APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cek notif.mp3
+        run: |
+          test -f notif.mp3 || (echo "File notif.mp3 belum ada di root repositori. Upload dulu." && exit 1)
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: android-actions/setup-android@v3
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Buat proyek Android
+        run: |
+          set -e
+          mkdir -p android-app
+          cat > android-app/settings.gradle <<'EOF'
+          pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories { google(); mavenCentral() }
+          }
+          rootProject.name = "IndependentWallet"
+          include ':app'
+          EOF
+          mkdir -p android-app
+          cat > android-app/build.gradle <<'EOF'
+          plugins {
+              id 'com.android.application' version '8.5.2' apply false
+              id 'org.jetbrains.kotlin.android' version '1.9.24' apply false
+          }
+          EOF
+          mkdir -p android-app
+          cat > android-app/gradle.properties <<'EOF'
+          org.gradle.jvmargs=-Xmx2g
+          android.nonTransitiveRClass=true
+          EOF
+          mkdir -p android-app/app
+          cat > android-app/app/build.gradle <<'EOF'
+          plugins {
+              id 'com.android.application'
+              id 'org.jetbrains.kotlin.android'
+          }
+          android {
+              namespace 'com.independent.wallet'
+              compileSdk 34
+              defaultConfig {
+                  applicationId 'com.independent.wallet'
+                  minSdk 26
+                  targetSdk 34
+                  versionCode 1
+                  versionName '1.0'
+              }
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_17
+                  targetCompatibility JavaVersion.VERSION_17
+              }
+              kotlinOptions { jvmTarget = '17' }
+          }
+          EOF
+          mkdir -p android-app/app/src/main
+          cat > android-app/app/src/main/AndroidManifest.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.INTERNET" />
+              <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+              <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+              <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+              <uses-permission android:name="android.permission.CAMERA" />
+              <uses-feature android:name="android.hardware.camera" android:required="false" />
+          
+              <application
+                  android:label="Independent Wallet"
+                  android:icon="@drawable/ic_launcher"
+                  android:allowBackup="false"
+                  android:usesCleartextTraffic="true"
+                  android:theme="@android:style/Theme.Material.Light.NoActionBar">
+          
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true"
+                      android:configChanges="orientation|screenSize|keyboardHidden"
+                      android:windowSoftInputMode="adjustResize">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+          
+                  <service
+                      android:name=".ListenService"
+                      android:exported="false"
+                      android:foregroundServiceType="specialUse">
+                      <property
+                          android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                          android:value="Menerima notifikasi transfer secara langsung" />
+                  </service>
+          
+                  <receiver android:name=".BootReceiver" android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.BOOT_COMPLETED" />
+                      </intent-filter>
+                  </receiver>
+              </application>
+          </manifest>
+          EOF
+          mkdir -p android-app/app/src/main/res/drawable
+          cat > android-app/app/src/main/res/drawable/ic_launcher.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <vector xmlns:android="http://schemas.android.com/apk/res/android"
+              android:width="96dp"
+              android:height="96dp"
+              android:viewportWidth="96"
+              android:viewportHeight="96">
+              <path android:fillColor="#118EEA" android:pathData="M48,48m-48,0a48,48 0 1,1 96,0a48,48 0 1,1 -96,0" />
+              <path android:fillColor="#FFFFFF" android:pathData="M22,34 C34,26 44,40 56,34 C62,31 68,30 74,31 L74,64 C66,61 58,69 48,68 C40,67 34,62 22,66 Z" />
+          </vector>
+          EOF
+          mkdir -p android-app/app/src/main/res/drawable
+          cat > android-app/app/src/main/res/drawable/ic_notify.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <vector xmlns:android="http://schemas.android.com/apk/res/android"
+              android:width="24dp"
+              android:height="24dp"
+              android:viewportWidth="24"
+              android:viewportHeight="24">
+              <path android:fillColor="#FFFFFF" android:pathData="M12,2a10,10 0 1,0 0,20a10,10 0 1,0 0,-20z" />
+          </vector>
+          EOF
+          mkdir -p android-app/app/src/main/java/com/independent/wallet
+          cat > android-app/app/src/main/java/com/independent/wallet/MainActivity.kt <<'EOF'
+          package com.independent.wallet
+          
+          import android.Manifest
+          import android.app.Activity
+          import android.app.AlertDialog
+          import android.content.Context
+          import android.content.Intent
+          import android.content.pm.PackageManager
+          import android.net.Uri
+          import android.os.Build
+          import android.os.Bundle
+          import android.os.PowerManager
+          import android.provider.Settings
+          import android.text.InputType
+          import android.webkit.JavascriptInterface
+          import android.webkit.PermissionRequest
+          import android.webkit.ValueCallback
+          import android.webkit.WebChromeClient
+          import android.webkit.WebResourceError
+          import android.webkit.WebResourceRequest
+          import android.webkit.WebView
+          import android.webkit.WebViewClient
+          import android.widget.EditText
+          
+          class MainActivity : Activity() {
+          
+              companion object {
+                  @Volatile
+                  var visible = false
+              }
+          
+              private lateinit var web: WebView
+              private var fileCb: ValueCallback<Array<Uri>>? = null
+              private var pendingPerm: PermissionRequest? = null
+              private var errorShown = false
+          
+              private fun prefs() = getSharedPreferences("w", Context.MODE_PRIVATE)
+          
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  web = WebView(this)
+                  setContentView(web)
+                  val s = web.settings
+                  s.javaScriptEnabled = true
+                  s.domStorageEnabled = true
+                  s.mediaPlaybackRequiresUserGesture = false
+                  web.addJavascriptInterface(Bridge(), "AndroidBridge")
+          
+                  web.webViewClient = object : WebViewClient() {
+                      override fun onReceivedError(view: WebView?, request: WebResourceRequest?, error: WebResourceError?) {
+                          if (request != null && request.isForMainFrame) showError()
+                      }
+                      override fun onPageFinished(view: WebView?, url: String?) {
+                          errorShown = false
+                      }
+                  }
+          
+                  web.webChromeClient = object : WebChromeClient() {
+                      override fun onPermissionRequest(request: PermissionRequest?) {
+                          if (request == null) return
+                          runOnUiThread {
+                              if (checkSelfPermission(Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
+                                  request.grant(request.resources)
+                              } else {
+                                  pendingPerm = request
+                                  requestPermissions(arrayOf(Manifest.permission.CAMERA), 2)
+                              }
+                          }
+                      }
+          
+                      override fun onShowFileChooser(
+                          webView: WebView?,
+                          filePathCallback: ValueCallback<Array<Uri>>?,
+                          fileChooserParams: WebChromeClient.FileChooserParams?
+                      ): Boolean {
+                          fileCb?.onReceiveValue(null)
+                          fileCb = filePathCallback
+                          return try {
+                              startActivityForResult(fileChooserParams!!.createIntent(), 3)
+                              true
+                          } catch (e: Exception) {
+                              fileCb = null
+                              false
+                          }
+                      }
+                  }
+          
+                  if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+                      requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1)
+                  }
+                  askBattery()
+                  load()
+              }
+          
+              private fun load() {
+                  val u = prefs().getString("url", null)
+                  if (u.isNullOrBlank()) askUrl() else web.loadUrl(u)
+              }
+          
+              private fun askUrl() {
+                  val et = EditText(this)
+                  et.hint = "https://nama-server.onrender.com"
+                  et.inputType = InputType.TYPE_TEXT_VARIATION_URI
+                  et.setText(prefs().getString("url", ""))
+                  AlertDialog.Builder(this)
+                      .setTitle("Alamat server")
+                      .setMessage("Masukkan alamat server wallet kamu")
+                      .setView(et)
+                      .setCancelable(false)
+                      .setPositiveButton("Simpan") { _, _ ->
+                          var v = et.text.toString().trim().trimEnd('/')
+                          if (v.isEmpty()) { askUrl(); return@setPositiveButton }
+                          if (!v.startsWith("http")) v = "https://" + v
+                          prefs().edit().putString("url", v).apply()
+                          web.loadUrl(v)
+                      }
+                      .show()
+              }
+          
+              private fun showError() {
+                  if (errorShown) return
+                  errorShown = true
+                  runOnUiThread {
+                      AlertDialog.Builder(this)
+                          .setTitle("Tidak bisa terhubung")
+                          .setMessage("Server tidak bisa dijangkau. Periksa internet atau alamat server.")
+                          .setPositiveButton("Coba lagi") { _, _ -> errorShown = false; load() }
+                          .setNegativeButton("Ubah alamat") { _, _ -> errorShown = false; askUrl() }
+                          .setCancelable(false)
+                          .show()
+                  }
+              }
+          
+              private fun askBattery() {
+                  val p = prefs()
+                  if (p.getBoolean("asked", false)) return
+                  p.edit().putBoolean("asked", true).apply()
+                  try {
+                      val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+                      if (!pm.isIgnoringBatteryOptimizations(packageName)) {
+                          startActivity(
+                              Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:" + packageName))
+                          )
+                      }
+                  } catch (e: Exception) {
+                  }
+              }
+          
+              inner class Bridge {
+                  @JavascriptInterface
+                  fun setAuth(id: String, token: String) {
+                      prefs().edit().putString("auth", id + "." + token).apply()
+                      ListenService.start(this@MainActivity)
+                  }
+              }
+          
+              override fun onResume() {
+                  super.onResume()
+                  visible = true
+                  if (prefs().getString("auth", null) != null) ListenService.start(this)
+              }
+          
+              override fun onPause() {
+                  visible = false
+                  super.onPause()
+              }
+          
+              @Suppress("DEPRECATION")
+              override fun onBackPressed() {
+                  if (web.canGoBack()) web.goBack() else super.onBackPressed()
+              }
+          
+              override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+                  super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+                  if (requestCode == 2) {
+                      val r = pendingPerm
+                      pendingPerm = null
+                      if (r != null) {
+                          if (grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED) r.grant(r.resources) else r.deny()
+                      }
+                  }
+              }
+          
+              @Suppress("DEPRECATION")
+              override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+                  super.onActivityResult(requestCode, resultCode, data)
+                  if (requestCode == 3) {
+                      fileCb?.onReceiveValue(WebChromeClient.FileChooserParams.parseResult(resultCode, data))
+                      fileCb = null
+                  }
+              }
+          }
+          EOF
+          mkdir -p android-app/app/src/main/java/com/independent/wallet
+          cat > android-app/app/src/main/java/com/independent/wallet/ListenService.kt <<'EOF'
+          package com.independent.wallet
+          
+          import android.app.Notification
+          import android.app.NotificationChannel
+          import android.app.NotificationManager
+          import android.app.PendingIntent
+          import android.app.Service
+          import android.content.Context
+          import android.content.Intent
+          import android.content.pm.ServiceInfo
+          import android.media.AudioAttributes
+          import android.net.Uri
+          import android.os.Build
+          import android.os.IBinder
+          import org.json.JSONObject
+          import java.io.BufferedReader
+          import java.io.InputStreamReader
+          import java.net.HttpURLConnection
+          import java.net.URL
+          import java.net.URLEncoder
+          
+          class ListenService : Service() {
+          
+              companion object {
+                  const val CH_LIVE = "live"
+                  const val CH_MSG = "msg_v1"
+          
+                  fun start(c: Context) {
+                      try {
+                          c.startForegroundService(Intent(c, ListenService::class.java))
+                      } catch (e: Exception) {
+                      }
+                  }
+              }
+          
+              @Volatile
+              private var running = false
+              private var worker: Thread? = null
+          
+              override fun onBind(intent: Intent?): IBinder? = null
+          
+              override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+                  createChannels()
+                  val n = Notification.Builder(this, CH_LIVE)
+                      .setSmallIcon(R.drawable.ic_notify)
+                      .setContentTitle("Independent Wallet")
+                      .setContentText("Menunggu transfer masuk")
+                      .setOngoing(true)
+                      .build()
+                  if (Build.VERSION.SDK_INT >= 34) {
+                      startForeground(1, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
+                  } else {
+                      startForeground(1, n)
+                  }
+                  if (!running) {
+                      running = true
+                      worker = Thread { loop() }.also { it.start() }
+                  }
+                  return START_STICKY
+              }
+          
+              override fun onDestroy() {
+                  running = false
+                  worker?.interrupt()
+                  super.onDestroy()
+              }
+          
+              private fun createChannels() {
+                  val nm = getSystemService(NotificationManager::class.java)
+                  nm.createNotificationChannel(NotificationChannel(CH_LIVE, "Layanan latar belakang", NotificationManager.IMPORTANCE_LOW))
+                  val ch = NotificationChannel(CH_MSG, "Saldo masuk", NotificationManager.IMPORTANCE_HIGH)
+                  val at = AudioAttributes.Builder()
+                      .setUsage(AudioAttributes.USAGE_NOTIFICATION)
+                      .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                      .build()
+                  ch.setSound(Uri.parse("android.resource://" + packageName + "/raw/notif"), at)
+                  ch.enableVibration(true)
+                  nm.createNotificationChannel(ch)
+              }
+          
+              private fun loop() {
+                  var delay = 2000L
+                  while (running) {
+                      try {
+                          val p = getSharedPreferences("w", Context.MODE_PRIVATE)
+                          val base = p.getString("url", null)
+                          val auth = p.getString("auth", null)
+                          if (base == null || auth == null) {
+                              Thread.sleep(5000)
+                              continue
+                          }
+                          catchUp(base, auth)
+                          val c = URL(base + "/api/events?auth=" + URLEncoder.encode(auth, "UTF-8")).openConnection() as HttpURLConnection
+                          c.connectTimeout = 15000
+                          c.readTimeout = 70000
+                          val r = BufferedReader(InputStreamReader(c.inputStream))
+                          delay = 2000L
+                          var ev = ""
+                          while (running) {
+                              val line = r.readLine() ?: break
+                              if (line.startsWith("event:")) {
+                                  ev = line.substring(6).trim()
+                              } else if (line.startsWith("data:") && ev == "notif") {
+                                  handle(JSONObject(line.substring(5).trim()))
+                                  ev = ""
+                              }
+                          }
+                      } catch (e: InterruptedException) {
+                          return
+                      } catch (e: Exception) {
+                      }
+                      try {
+                          Thread.sleep(delay)
+                      } catch (e: InterruptedException) {
+                          return
+                      }
+                      delay = minOf(delay * 2, 60000L)
+                  }
+              }
+          
+              private fun catchUp(base: String, auth: String) {
+                  val c = URL(base + "/api/me").openConnection() as HttpURLConnection
+                  c.setRequestProperty("Authorization", "Bearer " + auth)
+                  c.connectTimeout = 15000
+                  c.readTimeout = 20000
+                  val txt = c.inputStream.bufferedReader().use { it.readText() }
+                  val arr = JSONObject(txt).getJSONArray("notifs")
+                  val p = getSharedPreferences("w", Context.MODE_PRIVATE)
+                  val last = p.getLong("lastTs", 0L)
+                  var max = 0L
+                  for (i in 0 until arr.length()) {
+                      val ts = arr.getJSONObject(i).optLong("ts")
+                      if (ts > max) max = ts
+                  }
+                  if (last == 0L) {
+                      p.edit().putLong("lastTs", if (max > 0L) max else 1L).apply()
+                      return
+                  }
+                  for (i in arr.length() - 1 downTo 0) {
+                      val n = arr.getJSONObject(i)
+                      val ts = n.optLong("ts")
+                      if (ts > last && !n.optBoolean("read")) show(n.optString("title"), n.optString("text"), ts)
+                  }
+                  if (max > last) p.edit().putLong("lastTs", max).apply()
+              }
+          
+              private fun handle(o: JSONObject) {
+                  val ts = o.optLong("ts")
+                  val p = getSharedPreferences("w", Context.MODE_PRIVATE)
+                  if (ts > p.getLong("lastTs", 0L)) {
+                      p.edit().putLong("lastTs", ts).apply()
+                      show(o.optString("title"), o.optString("text"), ts)
+                  }
+              }
+          
+              private fun show(title: String, text: String, ts: Long) {
+                  if (MainActivity.visible) return
+                  val pi = PendingIntent.getActivity(
+                      this, 0, Intent(this, MainActivity::class.java),
+                      PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+                  )
+                  val n = Notification.Builder(this, CH_MSG)
+                      .setSmallIcon(R.drawable.ic_notify)
+                      .setContentTitle(title)
+                      .setContentText(text)
+                      .setStyle(Notification.BigTextStyle().bigText(text))
+                      .setContentIntent(pi)
+                      .setAutoCancel(true)
+                      .build()
+                  getSystemService(NotificationManager::class.java).notify((ts % 1000000000L).toInt() + 2, n)
+              }
+          }
+          EOF
+          mkdir -p android-app/app/src/main/java/com/independent/wallet
+          cat > android-app/app/src/main/java/com/independent/wallet/BootReceiver.kt <<'EOF'
+          package com.independent.wallet
+          
+          import android.content.BroadcastReceiver
+          import android.content.Context
+          import android.content.Intent
+          
+          class BootReceiver : BroadcastReceiver() {
+              override fun onReceive(context: Context, intent: Intent?) {
+                  val p = context.getSharedPreferences("w", Context.MODE_PRIVATE)
+                  if (p.getString("auth", null) != null) ListenService.start(context)
+              }
+          }
+          EOF
+          mkdir -p android-app/app/src/main/res/raw
+          cp notif.mp3 android-app/app/src/main/res/raw/notif.mp3
+
+      - name: Build APK
+        working-directory: android-app
+        run: gradle assembleDebug --no-daemon
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: IndependentWallet-APK
+          path: android-app/app/build/outputs/apk/debug/app-debug.apk
